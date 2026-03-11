@@ -52,6 +52,12 @@ Add the following to `~/.claude/settings.json`:
 - **`git`** — for branch detection (gracefully falls back to `?` if not in a repo).
 - A terminal that supports ANSI escape codes (virtually all modern terminals).
 
+## Why "usable" context instead of raw percentage?
+
+Claude Code reports a 200k token context window, but it doesn't actually let you use all 200k. Internally, it reserves ~33k tokens as a buffer for autocompaction — when the context gets too full, Claude Code automatically summarizes older messages to free up space. This compaction is triggered *before* you hit the true 200k ceiling, so the last ~33k tokens are never available to your conversation.
+
+If you displayed percentage against the full 200k, you'd see the context get "compacted" at around 83% and never understand why it didn't reach 100%. This script instead calculates usage against the *usable* space (200k − 33k = ~167k), so 100% actually means "compaction is about to happen." The color thresholds (green → yellow at 50%, red at 80%) are calibrated against this usable space to give you a meaningful heads-up.
+
 ## Customization
 
 - **Autocompact buffer**: Change `AUTOCOMPACT_BUFFER` at the top of the script if Claude Code adjusts its internal buffer size.
