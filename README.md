@@ -99,6 +99,8 @@ bash tests/test-statusline.sh
 
 On macOS, `/bin/bash tests/test-statusline.sh` also verifies compatibility with the system Bash 3.2. Tests use synthetic JSON, a private temporary directory, and disposable Git repositories. They do not read Claude histories or session files.
 
+GitHub Actions runs these syntax checks and all 26 regression cases on Ubuntu and macOS for every pull request, and for pushes changing `statusline.sh`, `tests/`, or `.github/workflows/`. The macOS job also runs the suite with `/bin/bash`. The workflow uses the runners' existing tools and read-only repository permissions.
+
 ## License
 
 MIT
