@@ -1,0 +1,14 @@
+{
+  "model": {"display_name": ["not a label"]},
+  "context_window": {
+    "used_percentage": "50",
+    "context_window_size": "08",
+    "total_input_tokens": {"unexpected": 100},
+    "total_output_tokens": true
+  },
+  "cost": {
+    "total_duration_ms": "1+2",
+    "total_lines_added": "\u001b]52;c;fixture\u0007",
+    "total_lines_removed": -5
+  }
+}
