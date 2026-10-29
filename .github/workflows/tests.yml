@@ -1,0 +1,45 @@
+name: Regression tests
+
+on:
+  pull_request:
+  push:
+    paths:
+      - 'statusline.sh'
+      - 'tests/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Regression (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show existing tool versions
+        run: |
+          bash --version
+          jq --version
+          git --version
+      - name: Check Bash syntax
+        run: bash -n statusline.sh tests/test-statusline.sh
+      - name: Run regression suite
+        run: bash tests/test-statusline.sh
+      - name: Verify macOS system Bash compatibility
+        if: runner.os == 'macOS'
+        run: |
+          /bin/bash --version
+          /bin/bash -n statusline.sh tests/test-statusline.sh
+          /bin/bash tests/test-statusline.sh

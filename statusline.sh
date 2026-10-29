@@ -4,41 +4,87 @@
 
 set -euo pipefail
 
-INPUT=$(cat)
-
 # Autocompact buffer size (tokens). Adjust if Claude Code changes this.
 AUTOCOMPACT_BUFFER=33000
 
-# --- Parse fields with jq ---
-MODEL=$(echo "$INPUT" | jq -r '.model.display_name // "..."')
-RAW_PCT=$(echo "$INPUT" | jq -r '.context_window.used_percentage // 0' | awk '{printf "%d", $1}')
-CTX_MAX=$(echo "$INPUT" | jq -r '.context_window.context_window_size // 200000')
-CTX_USED=$(awk -v pct="$RAW_PCT" -v max="$CTX_MAX" 'BEGIN {printf "%d", (pct * max) / 100}')
-DURATION_MS=$(echo "$INPUT" | jq -r '.cost.total_duration_ms // 0')
-LINES_ADDED=$(echo "$INPUT" | jq -r '.cost.total_lines_added // 0')
-LINES_REMOVED=$(echo "$INPUT" | jq -r '.cost.total_lines_removed // 0')
-INPUT_TOKENS=$(echo "$INPUT" | jq -r '.context_window.total_input_tokens // 0')
-OUTPUT_TOKENS=$(echo "$INPUT" | jq -r '.context_window.total_output_tokens // 0')
+if ! command -v jq >/dev/null 2>&1; then
+  printf '◆ statusline: jq is required\n'
+  exit 0
+fi
 
-# Usable space = total - autocompact buffer
-CTX_USABLE=$((CTX_MAX - AUTOCOMPACT_BUFFER))
-# Percentage relative to usable space (can exceed 100%)
-CTX_PCT=$(awk -v used="$CTX_USED" -v usable="$CTX_USABLE" 'BEGIN {printf "%d", (used * 100) / usable}')
+# Parse exactly one object before emitting any fields. Normalize numbers here,
+# before they reach shell arithmetic, and strip terminal controls from labels.
+# NUL-delimited records preserve literal backslashes and whitespace in paths.
+FIELDS=()
+while IFS= read -r -d '' field; do
+  FIELDS[${#FIELDS[@]}]=$field
+done < <(jq -j -s --argjson buffer "$AUTOCOMPACT_BUFFER" '
+  def object_or_empty: if type == "object" then . else {} end;
+  def number_or($fallback):
+    if type == "number" and . >= 0 and . <= 9007199254740991
+    then . else $fallback end;
+  def count: number_or(0) | floor;
+  def safe_label:
+    if type == "string" then
+      gsub("[\u0000-\u001f\u007f-\u009f]"; "") |
+      if length > 0 then . else "..." end
+    else "..." end;
+  def directory:
+    if type == "string" then
+      if length > 0 and (contains("\u0000") | not) then . else null end
+    else null end;
 
-# --- Git branch (cached for performance) ---
-GIT_CACHE="/tmp/claude-statusline-git-cache"
-GIT_CACHE_TTL=5  # seconds
+  if length != 1 or (.[0] | type) != "object"
+  then error("expected one JSON object") else .[0] end |
+  (.model | object_or_empty) as $model |
+  (.cost | object_or_empty) as $cost |
+  (.context_window | object_or_empty) as $context |
+  (.workspace | object_or_empty) as $workspace |
+  ($context.context_window_size | number_or(200000) | floor |
+    if . > 0 then . else 200000 end) as $max |
+  # A fixed buffer cannot describe windows at or below its own size.
+  (if $max > $buffer then $max - $buffer else $max end) as $usable |
+  ($context.used_percentage | number_or(0) | if . > 100 then 100 else . end) as $pct |
+  ($pct * $max / 100) as $used |
+  [
+    ($model.display_name | safe_label),
+    ($used * 100 / $usable | floor),
+    ($used | floor),
+    $usable,
+    ($cost.total_duration_ms | count),
+    ($cost.total_lines_added | count),
+    ($cost.total_lines_removed | count),
+    ($context.total_input_tokens | count),
+    ($context.total_output_tokens | count),
+    (($workspace.current_dir | directory) // (.cwd | directory) // ".")
+  ] | .[] | tostring + "\u0000"
+' 2>/dev/null)
+
+# Slurping ensures malformed/truncated input never produces partial records.
+if [ "${#FIELDS[@]}" -ne 10 ]; then
+  printf '◆ statusline: invalid JSON\n'
+  exit 0
+fi
+MODEL=${FIELDS[0]}
+CTX_PCT=${FIELDS[1]}
+CTX_USED=${FIELDS[2]}
+CTX_USABLE=${FIELDS[3]}
+DURATION_MS=${FIELDS[4]}
+LINES_ADDED=${FIELDS[5]}
+LINES_REMOVED=${FIELDS[6]}
+INPUT_TOKENS=${FIELDS[7]}
+OUTPUT_TOKENS=${FIELDS[8]}
+PROJECT_DIR=${FIELDS[9]}
+
+# Query the supplied workspace directly: a shared cache can show another
+# session/repository branch and requires platform-specific stat flags.
 BRANCH="?"
-if [ -f "$GIT_CACHE" ]; then
-  CACHE_AGE=$(( $(date +%s) - $(stat -f%m "$GIT_CACHE" 2>/dev/null || echo 0) ))
-  if [ "$CACHE_AGE" -lt "$GIT_CACHE_TTL" ]; then
-    BRANCH=$(cat "$GIT_CACHE")
-  fi
+if command -v git >/dev/null 2>&1; then
+  BRANCH=$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null ||
+    git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || printf '?')
 fi
-if [ "$BRANCH" = "?" ]; then
-  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-  echo "$BRANCH" > "$GIT_CACHE" 2>/dev/null || true
-fi
+BRANCH=$(printf '%s' "$BRANCH" | jq -Rrs 'gsub("[\u0000-\u001f\u007f-\u009f]"; "")')
+if [ -z "$BRANCH" ]; then BRANCH="?"; fi
 
 # --- Session duration ---
 format_duration() {
