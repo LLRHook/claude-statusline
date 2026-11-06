@@ -11,9 +11,23 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 PASSED=0
 FAILED=0
 
+# Rendering never compiles. Build first, or select an already built binary.
+export STATUSLINE_BIN=${STATUSLINE_BIN:-"${CARGO_TARGET_DIR:-$ROOT/target}/debug/claude-statusline"}
+case $STATUSLINE_BIN in
+  /*) ;;
+  *) STATUSLINE_BIN="$PWD/$STATUSLINE_BIN" ;;
+esac
+if [ ! -x "$STATUSLINE_BIN" ]; then
+  printf 'Build the Rust binary first: cargo build --locked\n' >&2
+  exit 1
+fi
+mkdir -p "$TEST_TMP/home"
+export HOME="$TEST_TMP/home" XDG_CONFIG_HOME="$TEST_TMP/home"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+
 mkdir -p "$TEST_TMP/working directory" "$TEST_TMP/other repo" "$TEST_TMP/tools"
 export GIT_AUTHOR_NAME='Victor Ivanov' GIT_COMMITTER_NAME='Victor Ivanov'
-export GIT_AUTHOR_EMAIL='vivanov@paradigmtesting.com' GIT_COMMITTER_EMAIL='vivanov@paradigmtesting.com'
+export GIT_AUTHOR_EMAIL='victor.n.ivanov@gmail.com' GIT_COMMITTER_EMAIL='victor.n.ivanov@gmail.com'
 # Do not inherit a caller's repository selection into the fixture repositories.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 for repo in 'working directory' 'other repo'; do
@@ -23,7 +37,7 @@ for repo in 'working directory' 'other repo'; do
 done
 
 # A restricted PATH lets tests remove individual optional/required tools.
-for tool in jq awk git cat date stat; do
+for tool in jq git; do
   tool_path=$(command -v "$tool")
   ln -s "$tool_path" "$TEST_TMP/tools/$tool"
 done
@@ -213,16 +227,81 @@ missing_jq() {
   mv "$TEST_TMP/tools/jq" "$TEST_TMP/jq.saved"
   run_line "$ROOT/tests/fixtures/session.json" "$TEST_TMP/tools"
   mv "$TEST_TMP/jq.saved" "$TEST_TMP/tools/jq"
-  quiet_success && [ "$PLAIN" = '◆ statusline: jq is required' ]
+  quiet_success && [[ "$PLAIN" == *'│ fixture-working │'* ]]
 }
 
 minimal_tools() {
   mkdir -p "$TEST_TMP/minimal-tools"
   local tool
-  for tool in jq awk git; do
+  for tool in git; do
     ln -s "$(command -v "$tool")" "$TEST_TMP/minimal-tools/$tool"
   done
   run_line "$ROOT/tests/fixtures/session.json" "$TEST_TMP/minimal-tools"
+  quiet_success && [[ "$PLAIN" == *'│ fixture-working │'* ]]
+}
+
+exact_ansi() {
+  local expected
+  run_line "$ROOT/tests/fixtures/session.json"
+  printf -v expected '\033[36m\033[1m◆\033[0m \033[37m\033[1mClaude Fixture\033[0m\033[2m │ \033[0m\033[32mctx: 41%% ▰▰▰▰▱▱▱▱▱▱\033[0m \033[2m(70k/167k)\033[0m\033[2m │ \033[0m\033[35mfixture-working\033[0m\033[2m │ \033[0m\033[2m1h2m\033[0m\033[2m │ \033[0m\033[32m+42\033[0m \033[31m-7\033[0m\033[2m │ \033[0m\033[2m↑285k ↓18k\033[0m'
+  quiet_success && [ "$(cat "$TEST_TMP/stdout")" = "$expected" ]
+}
+
+huge_exponent() {
+  printf '%s' '{"future":1e10000,"cost":{"total_lines_added":1e99999},"context_window":{"context_window_size":1e400}}' > "$TEST_TMP/input.json"
+  run_line "$TEST_TMP/input.json"
+  quiet_success && [[ "$PLAIN" == *'ctx: 0% ▱▱▱▱▱▱▱▱▱▱ (0/167k)'* ]] && [[ "$PLAIN" == *'│ +0 -0 │'* ]]
+}
+
+oversized_input() {
+  jq -n '{padding:("x" * 1048576)}' > "$TEST_TMP/input.json"
+  run_line "$TEST_TMP/input.json"
+  quiet_success && [ "$PLAIN" = '◆ statusline: invalid JSON' ]
+}
+
+unicode_labels() {
+  jq -n --arg model '日本語 Ω 🦀 é \literal %s' '{model:{display_name:$model}}' > "$TEST_TMP/input.json"
+  run_line "$TEST_TMP/input.json"
+  quiet_success && [[ "$PLAIN" == '◆ 日本語 Ω 🦀 é \literal %s │'* ]]
+}
+
+empty_labels() {
+  printf '%s' '{"model":{"display_name":"\u001b\u0000\u009f"}}' > "$TEST_TMP/input.json"
+  run_line "$TEST_TMP/input.json"
+  quiet_success && [[ "$PLAIN" == '◆ ... │'* ]]
+}
+
+nul_directory_fallback() {
+  jq -n --arg dir "$TEST_TMP/other repo" '{workspace:{current_dir:"bad\u0000path"},cwd:$dir}' > "$TEST_TMP/input.json"
+  run_line "$TEST_TMP/input.json"
+  quiet_success && [[ "$PLAIN" == *'│ fixture-other │'* ]]
+}
+
+inherited_git_directory() {
+  jq -n --arg dir "$TEST_TMP/other repo" '{workspace:{current_dir:$dir}}' > "$TEST_TMP/input.json"
+  GIT_DIR="$TEST_TMP/working directory/.git" GIT_WORK_TREE="$TEST_TMP/working directory" run_line "$TEST_TMP/input.json"
+  quiet_success && [[ "$PLAIN" == *'│ fixture-other │'* ]]
+}
+
+missing_binary() {
+  local saved=$STATUSLINE_BIN
+  STATUSLINE_BIN="$TEST_TMP/missing-binary"
+  run_line "$ROOT/tests/fixtures/session.json"
+  STATUSLINE_BIN=$saved
+  quiet_success && [ "$PLAIN" = '◆ statusline: Rust binary is required' ]
+}
+
+installed_launcher() {
+  local saved_binary=$STATUSLINE_BIN
+  local saved_script=$SCRIPT
+  mkdir -p "$TEST_TMP/installed path"
+  cp "$SCRIPT" "$TEST_TMP/installed path/statusline.sh"
+  cp "$STATUSLINE_BIN" "$TEST_TMP/installed path/claude-statusline"
+  SCRIPT="$TEST_TMP/installed path/statusline.sh"
+  STATUSLINE_BIN=''
+  run_line "$ROOT/tests/fixtures/session.json" "$TEST_TMP/tools"
+  SCRIPT=$saved_script
+  STATUSLINE_BIN=$saved_binary
   quiet_success && [[ "$PLAIN" == *'│ fixture-working │'* ]]
 }
 
@@ -231,7 +310,9 @@ for test_name in normal_session malformed_json empty_input invalid_top_levels \
   extended_context out_of_range_percentages numeric_formats numeric_overflow \
   arithmetic_injection integer_boundary terminal_controls workspace_branch cwd_branch \
   workspace_whitespace outside_repository no_stale_branch branch_controls detached_head \
-  missing_git missing_jq minimal_tools; do
+  missing_git missing_jq minimal_tools exact_ansi huge_exponent oversized_input \
+  unicode_labels empty_labels nul_directory_fallback inherited_git_directory \
+  missing_binary installed_launcher; do
   if [ -n "$TEST_FILTER" ] && [[ "$test_name" != *"$TEST_FILTER"* ]]; then continue; fi
   if "$test_name"; then
     printf 'PASS %s\n' "$test_name"
