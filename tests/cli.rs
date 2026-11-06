@@ -207,3 +207,52 @@ fn context_color_thresholds_and_capped_bar_are_exact() {
         assert!(quiet_line(&output).contains(&format!("\x1b[{color}mctx: {percent}% {bar}\x1b[0m")));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn invalid_utf8_git_ref_uses_one_replacement_in_direct_and_launcher_output() {
+    use std::ffi::OsString;
+    use std::os::unix::{ffi::OsStringExt, fs::symlink};
+
+    let fixture = Fixture::new();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|path| path.is_file())
+        .expect("Git is required for this synthetic ref regression");
+    symlink(&git, fixture.0.join("git")).unwrap();
+    assert!(Command::new(&git)
+        .args(["init", "-q"])
+        .current_dir(&fixture.0)
+        .env_clear()
+        .env("HOME", &fixture.0)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap()
+        .status
+        .success());
+    for suffix in [&b"\xed\xa0\x80"[..], &b"\xe2A"[..]] {
+        let mut reference = b"refs/heads/invalid-".to_vec();
+        reference.extend_from_slice(suffix);
+        assert!(Command::new(&git)
+            .args(["symbolic-ref", "HEAD"])
+            .arg(OsString::from_vec(reference))
+            .current_dir(&fixture.0)
+            .env_clear()
+            .env("HOME", &fixture.0)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let input = serde_json::to_vec(&serde_json::json!({
+            "workspace": {"current_dir": fixture.0},
+        }))
+        .unwrap();
+        let direct = fixture.run(&input, false);
+        let launched = fixture.run(&input, true);
+        assert!(quiet_line(&direct).contains("\x1b[35minvalid-�\x1b[0m"));
+        assert_eq!(quiet_line(&launched), quiet_line(&direct));
+    }
+}

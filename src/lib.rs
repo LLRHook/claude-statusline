@@ -257,11 +257,42 @@ fn git_branch(directory: &str) -> String {
             .output();
         if let Ok(output) = output {
             if output.status.success() {
-                return safe_label(&String::from_utf8_lossy(&output.stdout), "?");
+                // Shell command substitution removed trailing newlines before
+                // the old raw decoder saw the branch bytes.
+                let mut bytes = output.stdout.as_slice();
+                while let Some(rest) = bytes.strip_suffix(b"\n") {
+                    bytes = rest;
+                }
+                return safe_label(&git_text(bytes), "?");
             }
         }
     }
     "?".to_owned()
+}
+
+fn git_text(mut bytes: &[u8]) -> String {
+    // Git refs may contain arbitrary bytes. Match the previous jq raw-input
+    // decoder's replacement grouping without relaxing JSON stdin validation.
+    let mut text = String::with_capacity(bytes.len());
+    while let Some(&first) = bytes.first() {
+        let width = match first {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => 1,
+        };
+        let length = if bytes.len() < width {
+            bytes.len()
+        } else {
+            1 + bytes[1..width]
+                .iter()
+                .take_while(|&&byte| (0x80..=0xbf).contains(&byte))
+                .count()
+        };
+        text.push_str(std::str::from_utf8(&bytes[..length]).unwrap_or("�"));
+        bytes = &bytes[length..];
+    }
+    text
 }
 
 fn format_duration(ms: u64) -> String {
@@ -291,6 +322,22 @@ fn format_tokens(tokens: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_bytes_keep_prior_replacement_grouping_and_valid_unicode() {
+        for (input, expected) in [
+            (&b"valid-\xe4\xb8\x96\xe7\x95\x8c\n"[..], "valid-世界\n"),
+            (&b"\xed\xa0\x80"[..], "�"),
+            (&b"\xf4\x90\x80\x80"[..], "�"),
+            (&b"\xc0\xaf"[..], "��"),
+            (&b"\xe2A"[..], "�"),
+            (&b"\xe2\x82A"[..], "�A"),
+            (&b"\xf0\x82"[..], "�"),
+            (&b"\xff\x80"[..], "��"),
+        ] {
+            assert_eq!(git_text(input), expected, "{input:?}");
+        }
+    }
 
     #[test]
     fn duration_boundaries() {
